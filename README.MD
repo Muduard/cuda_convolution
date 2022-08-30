@@ -1,0 +1,1 @@
+A cuda implementation of convolution for "Parallel programming for machine learning 2021/2022" course at University of Firenze.
