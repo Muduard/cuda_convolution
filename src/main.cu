@@ -1,19 +1,17 @@
 #include <iostream>
 #include <cstdlib>
 #include <cuda_runtime_api.h>
+#include <opencv2/opencv.hpp>
+#include <opencv2/core/types.hpp>
+using namespace cv;
 //Kernel Image Processing
-#define LOW 1.0f
-#define HI 10.0f
+#define LOW 0.0f
+#define HI 1.0f
 #define MALLOCF(size) static_cast<float*>(malloc(size))
 #define KWIDTH 3
 __constant__ float kernel[KWIDTH*KWIDTH];
 
-__device__
-static void CheckCudaErrorAux (const char* file, unsigned line, const char *statement, cudaError_t err){
-    if (err == cudaSuccess) return;
-    printf("%s\n",cudaGetErrorString(err));
-    
-}
+
 
 __global__ 
 void printA(float* A, int N){
@@ -82,13 +80,38 @@ void convolution1(float* M, float* R, int w, int h){
     
 }
 
+void setKernelRidgeDetection(float* K){
+    K[0] = -1;
+    K[1] = -1;
+    K[2] = -1;
+    K[3] = -1;
+    K[4] = 4;
+    K[5] = -1;
+    K[6] = -1;
+    K[7] = -1;
+    K[8] = -1;
+}
+void setKernelIdentity(float* K){
+    K[0] = 0;
+    K[1] = 0;
+    K[2] = 0;
+    K[3] = 0;
+    K[4] = 1;
+    K[5] = 0;
+    K[6] = 0;
+    K[7] = 0;
+    K[8] = 0;
+}
+
+
+
 
 int main(){
     
     float *A, *B,*C;
     float *AH, *BH, *CH,*DH;
-    int w = 4;
-    int h = 4;
+    int w = 128;
+    int h = 128;
     int kernelS = KWIDTH*KWIDTH;
     int imageS = w*h;
 
@@ -104,15 +127,9 @@ int main(){
     BH = MALLOCF(kernelSize);
     CH = MALLOCF(resultSize);
     DH = MALLOCF(kernelSize);
-    BH[0] = -1;
-    BH[1] = -1;
-    BH[2] = -1;
-    BH[3] = -1;
-    BH[4] = 4;
-    BH[5] = -1;
-    BH[6] = -1;
-    BH[7] = -1;
-    BH[8] = -1;
+
+    //Init Kernel
+    setKernelRidgeDetection(BH);
 
     //Alloc object in global memory
     cudaMalloc((void**)&A, imageSize);
@@ -122,21 +139,31 @@ int main(){
     cudaMalloc((void**)&C, resultSize);
 
     randInitA(AH,imageS);
-    printAH(AH,imageS, "image");
+    //printAH(AH,imageS, "image");
     cudaMemcpyFromSymbol(DH,kernel,kernelSize);
     //cudaMemcpy(DH,kernel,kernelSize, cudaMemcpyDeviceToHost);
-    printAH(DH, kernelS, "kernel");
+    //printAH(DH, kernelS, "kernel");
 
     cudaMemcpy(A,AH,imageSize,cudaMemcpyHostToDevice);
     //cudaMemcpy(B,BH,KWIDTH * sizeof(float),cudaMemcpyHostToDevice);
-    dim3 dimMM(w,h,1);
-    convolution1<<<1,dimMM>>>(A,C,w,h);
-
+    dim3 dimMM(16,16,1);
+    dim3 dimGrid(ceil(w/16.0), ceil(h/16.0), 1);
+    convolution1<<<dimGrid,dimMM>>>(A,C,w,h);
+    
     cudaMemcpy(CH,C,resultSize, cudaMemcpyDeviceToHost);
     
     printAH(CH, resultS,"result");
     
-    
+    Mat AImage(w,h,CV_32FC1, AH);
+    namedWindow("Display Image", WINDOW_AUTOSIZE );
+    imshow("Display Image", AImage);
+    waitKey(0);
+
+    Mat CImage(w,h,CV_32FC1, CH);
+    namedWindow("Display Image", WINDOW_AUTOSIZE );
+    imshow("Display Image", CImage);
+    waitKey(0);
+
     cudaFree(A);
     cudaFree(B);
     cudaFree(C);
