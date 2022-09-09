@@ -1,15 +1,22 @@
 #include <iostream>
 #include <cstdlib>
 #include <cuda_runtime_api.h>
+#include <chrono>
+#include <vector>
 #include <opencv2/opencv.hpp>
 #include <opencv2/core/types.hpp>
+#include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/highgui.hpp>
 using namespace cv;
+using namespace std::chrono;
 //Kernel Image Processing
-#define LOW 0.0f
-#define HI 1.0f
-#define MALLOCF(size) static_cast<float*>(malloc(size))
+#define LOW 0
+#define HI 255
+#define MALLOCF(size) static_cast<uint8_t*>(malloc(size))
 #define KWIDTH 3
-__constant__ float kernel[KWIDTH*KWIDTH];
+#define GAUSSIAN_COEFF 0.0625f
+__constant__ uint8_t kernel[KWIDTH*KWIDTH];
 
 
 
@@ -27,26 +34,17 @@ void printM(float* A, int w, int h){
 
 }
 
-void printAH(float* A, int N, std::string text){
+void printAH(uint8_t* A, int N, std::string text){
     std::cout << "Array: " << text << std::endl;
     for(int i=0;i<N;i++)
-        printf("i = %d: %f\n", i, A[i]);
+        printf("i = %d: %d\n", i, A[i]);
 }
 
 
 
-__global__
-void sumArr(float* A, float *B, float* C, int N){
-    int i = threadIdx.x;
-    if(i < N){
-        C[i] = A[i] + B[i];
-    }
-}
-
-
-void randInitA(float* A, int N ){
+void randInitA(uint8_t* A, int N ){
     for(int i=0;i<N;i++)
-        A[i] = LOW + static_cast <float> (rand()) / ( static_cast <float> (RAND_MAX/(HI-LOW))) ;
+        A[i] = LOW + static_cast <uint8_t> (rand()) / ( static_cast <float> (RAND_MAX/(HI-LOW))) ;
 }
 
 
@@ -54,7 +52,7 @@ void randInitA(float* A, int N ){
 
 
 __global__
-void convolution1(float* M, float* R, int w, int h){
+void convolutionCuda(uint8_t* M, uint8_t* R, int w, int h, float kernelCoeff){
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     float val = 0;
@@ -73,25 +71,49 @@ void convolution1(float* M, float* R, int w, int h){
                 }
             }
         }
-        R[row * w + col] =  val; 
+        R[row * w + col] = ceil( (val * kernelCoeff)); 
         
         
     }
     
 }
 
-void setKernelRidgeDetection(float* K){
-    K[0] = -1;
-    K[1] = -1;
-    K[2] = -1;
-    K[3] = -1;
-    K[4] = 4;
-    K[5] = -1;
-    K[6] = -1;
-    K[7] = -1;
-    K[8] = -1;
+void convolutionCpu(uint8_t* M, uint8_t* R, uint8_t* kernel, int w, int h, float kernelCoeff){
+    float val = 0;
+    for(int col = 0; col < w;col++){
+        for(int row=0;row < h;row++){
+            int startCol = col - (KWIDTH/2);
+            int startRow = row - (KWIDTH/2);
+            for(int i=0; i < KWIDTH; i++){
+                for(int j=0; j < KWIDTH;j++){
+                    int curRow = startRow + i;
+                    int curCol = startCol + j;
+
+                    if(curRow > -1 && curRow < h && curCol > -1 && curCol < w){
+                        val += M[curRow * w + curCol] * kernel[i*KWIDTH + j];
+                        
+                    }
+                }
+            }
+        R[row * w + col] = ceil( (val * kernelCoeff)); 
+        }
+    }
+    
 }
-void setKernelIdentity(float* K){
+
+
+void setKernelGaussian(uint8_t* K){
+    K[0] = 1;
+    K[1] = 2;
+    K[2] = 1;
+    K[3] = 2;
+    K[4] = 4;
+    K[5] = 2;
+    K[6] = 1;
+    K[7] = 2;
+    K[8] = 1;
+}
+void setKernelIdentity(uint8_t* K){
     K[0] = 0;
     K[1] = 0;
     K[2] = 0;
@@ -104,69 +126,144 @@ void setKernelIdentity(float* K){
 }
 
 
+void imageConvolution(){
+    //Read image
+    Mat img = imread("../images/sudoku.png", IMREAD_GRAYSCALE);
+
+    std::vector<uint8_t> imageVector;
+    imageVector.assign(img.data, img.data + img.total()*img.channels());
+    //Convert to float matrix
+    uint8_t imageFloat[imageVector.size()];
+    std::copy(imageVector.begin(), imageVector.end(), imageFloat);
+    
+    int w = img.cols;
+    int h = img.rows;
+
+    int kernelS = KWIDTH*KWIDTH;
+    int imageS = w*h;
+    
+    size_t imageSize = imageS * sizeof(uint8_t);
+    size_t kernelSize = kernelS * sizeof(uint8_t);
+    size_t resultSize = imageS * sizeof(uint8_t);
+
+    uint8_t *hostKernel;
+    hostKernel = MALLOCF(kernelSize);
+    
+    uint8_t *convImage, *cudaConvImage, *cudaImage;
+    //Init Kernel
+    setKernelGaussian(hostKernel);
+
+
+    convImage = MALLOCF(imageSize);
+    //Alloc object in global memory
+    cudaMalloc((void**)&cudaImage, imageSize);
+    cudaMalloc((void**)&cudaConvImage, resultSize);
+    cudaMemcpyToSymbol(kernel, hostKernel, kernelSize);
+
+    cudaMemcpy(cudaImage, imageFloat,imageSize,cudaMemcpyHostToDevice);
+    
+    dim3 dimMM(16,16,1);
+    dim3 dimGrid(ceil(w/16.0), ceil(h/16.0), 1);
+    auto start = high_resolution_clock::now();
+    convolutionCuda<<<dimGrid,dimMM>>>(cudaImage,cudaConvImage,w,h, GAUSSIAN_COEFF);
+    auto end = high_resolution_clock::now();
+
+    cudaMemcpy(convImage,cudaConvImage,resultSize, cudaMemcpyDeviceToHost);
+    
+
+    Mat img2(h,w,CV_8U,convImage);
+    namedWindow("Display Image", WINDOW_AUTOSIZE );
+    imshow("Display Image", img2);
+    waitKey(0);
+
+    cudaFree(cudaImage);
+    cudaFree(cudaConvImage);
+    cudaDeviceReset();
+    
+}
+
+int matrixConvolutionCuda(int size){
+    int kernelS = KWIDTH*KWIDTH;
+    int imageS = size * size;
+    
+    size_t imageSize = imageS * sizeof(uint8_t);
+    size_t kernelSize = kernelS * sizeof(uint8_t);
+
+    uint8_t *hostKernel;
+    hostKernel = MALLOCF(kernelSize);
+    
+    uint8_t *convImage, *cudaConvImage, *cudaImage, *image;
+    //Init Kernel
+    setKernelGaussian(hostKernel);
+
+    image = MALLOCF(imageSize);
+    convImage = MALLOCF(imageSize);
+    
+    randInitA(image,imageS);
+
+    //Alloc object in global memory
+    cudaMalloc((void**)&cudaImage, imageSize);
+    cudaMalloc((void**)&cudaConvImage, imageSize);
+    cudaMemcpyToSymbol(kernel, hostKernel, kernelSize);
+
+    cudaMemcpy(cudaImage, image,imageSize,cudaMemcpyHostToDevice);
+    
+    dim3 dimMM(16,16,1);
+    dim3 dimGrid(ceil(size/16.0), ceil(size/16.0), 1);
+    auto start = high_resolution_clock::now();
+    convolutionCuda<<<dimGrid,dimMM>>>(cudaImage,cudaConvImage,size,size, GAUSSIAN_COEFF);
+    auto end = high_resolution_clock::now();
+
+    cudaMemcpy(convImage,cudaConvImage,imageSize, cudaMemcpyDeviceToHost);
+
+    cudaFree(cudaImage);
+    cudaFree(cudaConvImage);
+    cudaDeviceReset();
+    
+    return duration_cast<nanoseconds>(end-start).count();
+}
+
+int matrixConvolution(int size){
+    int kernelS = KWIDTH*KWIDTH;
+    int imageS = size * size;
+    
+    size_t imageSize = imageS * sizeof(uint8_t);
+    size_t kernelSize = kernelS * sizeof(uint8_t);
+
+    uint8_t *kernel, *image, *convImage;
+    image = MALLOCF(imageSize);
+    convImage = MALLOCF(imageSize);
+    kernel = MALLOCF(kernelSize);
+    setKernelGaussian(kernel);
+    randInitA(image,imageS);
+    auto start = high_resolution_clock::now();
+    convolutionCpu(image,convImage,kernel,size,size, GAUSSIAN_COEFF);
+    auto end = high_resolution_clock::now();
+
+    return duration_cast<nanoseconds>(end-start).count();
+}
+
+void Test(){
+
+    std::vector<int> timeCpu,timeCuda;
+
+    //Gather data from various image sizes
+    for(int size = 8; size <= 2048; size*=2){
+        timeCuda.push_back(matrixConvolutionCuda(size));
+        std::cout << "size: " << size << std::endl;
+        timeCpu.push_back(matrixConvolution(size));
+    }
+
+    for(auto it=timeCuda.begin();it !=  timeCuda.end();++it){
+        std::cout << "time cuda: " << *it << " nanoseconds" << std::endl;
+    }
+    for(auto it=timeCpu.begin();it !=  timeCpu.end();++it){
+        std::cout << "time cpu: " << *it << " nanoseconds" << std::endl;
+    }
+}
 
 
 int main(){
-    
-    float *A, *B,*C;
-    float *AH, *BH, *CH,*DH;
-    int w = 128;
-    int h = 128;
-    int kernelS = KWIDTH*KWIDTH;
-    int imageS = w*h;
-
-    size_t imageSize = imageS * sizeof(float);
-    size_t kernelSize = kernelS * sizeof(float);
-
-    //Only square images
-    int resultS = imageS;
-    
-    size_t resultSize = resultS * sizeof(float);
-
-    AH = MALLOCF(imageSize);
-    BH = MALLOCF(kernelSize);
-    CH = MALLOCF(resultSize);
-    DH = MALLOCF(kernelSize);
-
-    //Init Kernel
-    setKernelRidgeDetection(BH);
-
-    //Alloc object in global memory
-    cudaMalloc((void**)&A, imageSize);
-    cudaMalloc((void**)&B, kernelSize);
-    cudaMemcpyToSymbol(kernel, BH, kernelSize);
-    //cudaMalloc((void**)&B, kernelSize);
-    cudaMalloc((void**)&C, resultSize);
-
-    randInitA(AH,imageS);
-    //printAH(AH,imageS, "image");
-    cudaMemcpyFromSymbol(DH,kernel,kernelSize);
-    //cudaMemcpy(DH,kernel,kernelSize, cudaMemcpyDeviceToHost);
-    //printAH(DH, kernelS, "kernel");
-
-    cudaMemcpy(A,AH,imageSize,cudaMemcpyHostToDevice);
-    //cudaMemcpy(B,BH,KWIDTH * sizeof(float),cudaMemcpyHostToDevice);
-    dim3 dimMM(16,16,1);
-    dim3 dimGrid(ceil(w/16.0), ceil(h/16.0), 1);
-    convolution1<<<dimGrid,dimMM>>>(A,C,w,h);
-    
-    cudaMemcpy(CH,C,resultSize, cudaMemcpyDeviceToHost);
-    
-    printAH(CH, resultS,"result");
-    
-    Mat AImage(w,h,CV_32FC1, AH);
-    namedWindow("Display Image", WINDOW_AUTOSIZE );
-    imshow("Display Image", AImage);
-    waitKey(0);
-
-    Mat CImage(w,h,CV_32FC1, CH);
-    namedWindow("Display Image", WINDOW_AUTOSIZE );
-    imshow("Display Image", CImage);
-    waitKey(0);
-
-    cudaFree(A);
-    cudaFree(B);
-    cudaFree(C);
-    cudaDeviceReset();
+    Test();
     return 0;
 }
