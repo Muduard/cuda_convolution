@@ -8,6 +8,8 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/highgui.hpp>
+#include "plotutils.hpp"
+
 using namespace cv;
 using namespace std::chrono;
 //Kernel Image Processing
@@ -220,7 +222,7 @@ int matrixConvolutionCuda(int size){
     cudaFree(cudaConvImage);
     cudaDeviceReset();
     
-    return duration_cast<nanoseconds>(end-start).count();
+    return duration_cast<microseconds>(end-start).count();
 }
 
 int matrixConvolution(int size){
@@ -240,18 +242,19 @@ int matrixConvolution(int size){
     convolutionCpu(image,convImage,kernel,size,size, GAUSSIAN_COEFF);
     auto end = high_resolution_clock::now();
 
-    return duration_cast<nanoseconds>(end-start).count();
+    return duration_cast<milliseconds>(end-start).count();
 }
 
 void Test(){
 
-    std::vector<int> timeCpu,timeCuda;
+    std::vector<double> timeCpu,timeCuda, sizes;
 
     //Gather data from various image sizes
-    for(int size = 8; size <= 2048; size*=2){
+    for(int size = 8; size <= 8192; size*=2){
         timeCuda.push_back(matrixConvolutionCuda(size));
         std::cout << "size: " << size << std::endl;
         timeCpu.push_back(matrixConvolution(size));
+        sizes.push_back(size);
     }
 
     for(auto it=timeCuda.begin();it !=  timeCuda.end();++it){
@@ -260,6 +263,7 @@ void Test(){
     for(auto it=timeCpu.begin();it !=  timeCpu.end();++it){
         std::cout << "time cpu: " << *it << " nanoseconds" << std::endl;
     }
+    plotSpeed(&timeCpu,&timeCuda,&sizes);
 }
 
 
