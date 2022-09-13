@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 project(finale_programmazione_parallela LANGUAGES CXX CUDA)
-
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED True)
 find_package(CUDA  REQUIRED)
 include_directories("${CUDA_INCLUDE_DIRS}")
 find_package( OpenCV REQUIRED )
@@ -15,7 +16,7 @@ FetchContent_Declare(sciplot_content
     FetchContent_Populate(sciplot_content)
   endif()
   include_directories(${sciplot_content_SOURCE_DIR})
-
+  include_directories(include)
 #add_library(datalib STATIC src/dataManipulator.cpp)
 #add_library(kmeans STATIC src/kmeans.cpp src/point.cpp)
 #add_library(utils STATIC src/ioUtils.cpp src/plotUtils.cpp)
@@ -26,7 +27,10 @@ FetchContent_Declare(sciplot_content
 #  target_include_directories(utils PUBLIC win_include)
 #endif()
 
-add_executable(finale src/main.cu)
+
+
+add_executable(finale src/main.cu src/plotutils.cpp)
+
 target_link_libraries( finale ${OpenCV_LIBS} )
 #target_link_libraries(datalib PUBLIC ${Boost_LIBRARIES})
 #target_link_libraries(parziale PUBLIC datalib)

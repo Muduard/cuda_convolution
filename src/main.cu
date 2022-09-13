@@ -8,6 +8,8 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/highgui.hpp>
+#include "plotutils.hpp"
+
 using namespace cv;
 using namespace std::chrono;
 //Kernel Image Processing
@@ -18,7 +20,15 @@ using namespace std::chrono;
 #define GAUSSIAN_COEFF 0.0625f
 __constant__ uint8_t kernel[KWIDTH*KWIDTH];
 
-
+ #define gpuErr(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort = true)
+{
+    if (code != cudaSuccess)
+    {
+        fprintf(stderr, "GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+        if (abort) exit(code);
+    }
+}
 
 __global__ 
 void printA(float* A, int N){
@@ -39,7 +49,11 @@ void printAH(uint8_t* A, int N, std::string text){
     for(int i=0;i<N;i++)
         printf("i = %d: %d\n", i, A[i]);
 }
-
+void printAHF(double* A, int N, std::string text){
+    std::cout << "Array: " << text << std::endl;
+    for(int i=0;i<N;i++)
+        printf("i = %d: %lf\n", i, A[i]);
+}
 
 
 void randInitA(uint8_t* A, int N ){
@@ -71,7 +85,7 @@ void convolutionCuda(uint8_t* M, uint8_t* R, int w, int h, float kernelCoeff){
                 }
             }
         }
-        R[row * w + col] = ceil( (val * kernelCoeff)); 
+        R[row * w + col] = ceil(val * kernelCoeff);
         
         
     }
@@ -126,18 +140,20 @@ void setKernelIdentity(uint8_t* K){
 }
 
 
-void imageConvolution(){
+void imageConvolution2(){
     //Read image
     Mat img = imread("../images/sudoku.png", IMREAD_GRAYSCALE);
-
+    imwrite("initial.png", img);
     std::vector<uint8_t> imageVector;
     imageVector.assign(img.data, img.data + img.total()*img.channels());
-    //Convert to float matrix
+    
     uint8_t imageFloat[imageVector.size()];
     std::copy(imageVector.begin(), imageVector.end(), imageFloat);
     
     int w = img.cols;
     int h = img.rows;
+
+
 
     int kernelS = KWIDTH*KWIDTH;
     int imageS = w*h;
@@ -153,14 +169,16 @@ void imageConvolution(){
     //Init Kernel
     setKernelGaussian(hostKernel);
 
-
+    //Alloc matrix for showing result
     convImage = MALLOCF(imageSize);
+
     //Alloc object in global memory
     cudaMalloc((void**)&cudaImage, imageSize);
     cudaMalloc((void**)&cudaConvImage, resultSize);
     cudaMemcpyToSymbol(kernel, hostKernel, kernelSize);
 
     cudaMemcpy(cudaImage, imageFloat,imageSize,cudaMemcpyHostToDevice);
+    
     
     dim3 dimMM(16,16,1);
     dim3 dimGrid(ceil(w/16.0), ceil(h/16.0), 1);
@@ -170,11 +188,8 @@ void imageConvolution(){
 
     cudaMemcpy(convImage,cudaConvImage,resultSize, cudaMemcpyDeviceToHost);
     
-
     Mat img2(h,w,CV_8U,convImage);
-    namedWindow("Display Image", WINDOW_AUTOSIZE );
-    imshow("Display Image", img2);
-    waitKey(0);
+    imwrite("convoluted.png", img2);
 
     cudaFree(cudaImage);
     cudaFree(cudaConvImage);
@@ -185,7 +200,7 @@ void imageConvolution(){
 int matrixConvolutionCuda(int size){
     int kernelS = KWIDTH*KWIDTH;
     int imageS = size * size;
-    
+
     size_t imageSize = imageS * sizeof(uint8_t);
     size_t kernelSize = kernelS * sizeof(uint8_t);
 
@@ -220,7 +235,7 @@ int matrixConvolutionCuda(int size){
     cudaFree(cudaConvImage);
     cudaDeviceReset();
     
-    return duration_cast<nanoseconds>(end-start).count();
+    return duration_cast<microseconds>(end-start).count();
 }
 
 int matrixConvolution(int size){
@@ -240,26 +255,23 @@ int matrixConvolution(int size){
     convolutionCpu(image,convImage,kernel,size,size, GAUSSIAN_COEFF);
     auto end = high_resolution_clock::now();
 
-    return duration_cast<nanoseconds>(end-start).count();
+    return duration_cast<microseconds>(end-start).count();
 }
 
 void Test(){
 
-    std::vector<int> timeCpu,timeCuda;
+    std::vector<double> timeCpu,timeCuda, sizes;
 
     //Gather data from various image sizes
-    for(int size = 8; size <= 2048; size*=2){
+    for(int size = 8; size <= 32768/2; size*=2){
         timeCuda.push_back(matrixConvolutionCuda(size));
         std::cout << "size: " << size << std::endl;
         timeCpu.push_back(matrixConvolution(size));
+        sizes.push_back(size);
     }
 
-    for(auto it=timeCuda.begin();it !=  timeCuda.end();++it){
-        std::cout << "time cuda: " << *it << " nanoseconds" << std::endl;
-    }
-    for(auto it=timeCpu.begin();it !=  timeCpu.end();++it){
-        std::cout << "time cpu: " << *it << " nanoseconds" << std::endl;
-    }
+    plotSpeed(&timeCpu,&timeCuda,&sizes);
+    //imageConvolution2();
 }
 
 
